@@ -1,0 +1,18 @@
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# JMeter / Results
+results/*.jtl
+results/*.csv
+results/*.log
+results/report/
+results/**/*.html
+
+# Logs
+*.log
+
+# Temp
+tmp/
