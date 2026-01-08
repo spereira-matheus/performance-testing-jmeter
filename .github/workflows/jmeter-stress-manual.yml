@@ -1,0 +1,94 @@
+name: JMeter CI - Stress (Manual)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  stress:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java 21 (LTS)
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "21"
+
+      - name: Download Apache JMeter
+        run: |
+          JMETER_VERSION="5.6.3"
+          curl -L -o apache-jmeter.tgz "https://archive.apache.org/dist/jmeter/binaries/apache-jmeter-${JMETER_VERSION}.tgz"
+          tar -xzf apache-jmeter.tgz
+          echo "JMETER_HOME=$PWD/apache-jmeter-${JMETER_VERSION}" >> $GITHUB_ENV
+
+      - name: Run Stress Test (non-GUI)
+        run: |
+          mkdir -p results/jtl results/reports
+
+          "$JMETER_HOME/bin/jmeter" -n -t test-plans/stress-ramp-jsonplaceholder.jmx -l results/jtl/stress.jtl
+          "$JMETER_HOME/bin/jmeter" -g results/jtl/stress.jtl -o results/reports/stress-report
+
+      - name: Quality Gate (Stress) - Optional
+        run: |
+          python3 - << 'PY'
+          import csv, os
+          from math import ceil
+
+          def percentile(values, p):
+            if not values: return None
+            values = sorted(values)
+            k = ceil((p/100) * len(values)) - 1
+            k = max(0, min(k, len(values)-1))
+            return values[k]
+
+          jtl_path = "results/jtl/stress.jtl"
+          if not os.path.exists(jtl_path):
+            raise SystemExit(f"[GATE] FAIL: Missing JTL file: {jtl_path}")
+
+          total = 0
+          errors = 0
+          elapsed = []
+
+          with open(jtl_path, newline='', encoding='utf-8', errors='ignore') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+              total += 1
+              try:
+                elapsed.append(int(row.get("elapsed", "0")))
+              except ValueError:
+                pass
+              success = (row.get("success", "") or "").strip().lower()
+              if success in ("false", "0", "no"):
+                errors += 1
+
+          error_rate = errors / total if total else 1
+          p95 = percentile(elapsed, 95)
+
+          print(f"[GATE] stress.jtl samples={total} errors={errors} error_rate={error_rate:.2%} p95={p95}ms")
+
+          # Stress gates are typically more permissive; adjust as needed
+          if error_rate > 0.05:
+            raise SystemExit("[GATE] FAIL: stress error_rate > 5%")
+          if p95 and p95 > 4000:
+            raise SystemExit("[GATE] FAIL: stress p95 > 4000ms")
+
+          print("[GATE] PASS: Stress thresholds met")
+          PY
+
+      - name: Upload Stress Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jmeter-stress-report
+          path: results/reports/stress-report
+
+      - name: Upload Stress JTL
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jmeter-stress-jtl
+          path: results/jtl/stress.jtl

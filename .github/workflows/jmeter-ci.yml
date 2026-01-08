@@ -1,10 +1,10 @@
-name: JMeter CI - Performance Tests
+name: JMeter CI - Smoke & Load
 
 on:
-  workflow_dispatch:
   push:
     branches: ["main"]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   jmeter:
@@ -33,7 +33,7 @@ jobs:
         run: |
           "$JMETER_HOME/bin/jmeter" -v
 
-      - name: Run JMeter Test Plans (non-GUI)
+      - name: Run JMeter Test Plans (Smoke + Load)
         run: |
           mkdir -p results/jtl results/reports
 
@@ -43,9 +43,64 @@ jobs:
           "$JMETER_HOME/bin/jmeter" -n -t test-plans/load-steady-jsonplaceholder.jmx -l results/jtl/load.jtl
           "$JMETER_HOME/bin/jmeter" -g results/jtl/load.jtl -o results/reports/load-report
 
-          "$JMETER_HOME/bin/jmeter" -n -t test-plans/stress-ramp-jsonplaceholder.jmx -l results/jtl/stress.jtl
-          "$JMETER_HOME/bin/jmeter" -g results/jtl/stress.jtl -o results/reports/stress-report
-          
+      - name: Quality Gate (error rate + p95) - Smoke & Load
+        run: |
+          python3 - << 'PY'
+          import csv, os
+          from math import ceil
+
+          def percentile(values, p):
+            if not values: return None
+            values = sorted(values)
+            k = ceil((p/100) * len(values)) - 1
+            k = max(0, min(k, len(values)-1))
+            return values[k]
+
+          def analyze_jtl(jtl_path, max_error_rate, max_p95_ms):
+            if not os.path.exists(jtl_path):
+              raise SystemExit(f"[GATE] FAIL: Missing JTL file: {jtl_path}")
+
+            total = 0
+            errors = 0
+            elapsed = []
+
+            with open(jtl_path, newline='', encoding='utf-8', errors='ignore') as f:
+              reader = csv.DictReader(f)
+              if reader.fieldnames is None:
+                raise SystemExit(f"[GATE] FAIL: JTL has no header (CSV). File: {jtl_path}")
+
+              for row in reader:
+                total += 1
+                try:
+                  elapsed.append(int(row.get("elapsed", "0")))
+                except ValueError:
+                  pass
+
+                success = (row.get("success", "") or "").strip().lower()
+                if success in ("false", "0", "no"):
+                  errors += 1
+
+            if total == 0:
+              raise SystemExit(f"[GATE] FAIL: No samples found in {jtl_path}")
+
+            error_rate = errors / total
+            p95 = percentile(elapsed, 95)
+
+            print(f"[GATE] {os.path.basename(jtl_path)} samples={total} errors={errors} error_rate={error_rate:.2%} p95={p95}ms")
+
+            if error_rate > max_error_rate:
+              raise SystemExit(f"[GATE] FAIL: error_rate {error_rate:.2%} > {max_error_rate:.2%} for {jtl_path}")
+            if p95 is None:
+              raise SystemExit(f"[GATE] FAIL: could not compute p95 for {jtl_path}")
+            if p95 > max_p95_ms:
+              raise SystemExit(f"[GATE] FAIL: p95 {p95}ms > {max_p95_ms}ms for {jtl_path}")
+
+          analyze_jtl("results/jtl/smoke.jtl", max_error_rate=0.00, max_p95_ms=1200)
+          analyze_jtl("results/jtl/load.jtl",  max_error_rate=0.01, max_p95_ms=2000)
+
+          print("[GATE] PASS: Smoke & Load thresholds met")
+          PY
+
       - name: Upload JMeter Reports
         if: always()
         uses: actions/upload-artifact@v4
