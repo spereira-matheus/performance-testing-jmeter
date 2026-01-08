@@ -16,3 +16,8 @@ results/**/*.html
 
 # Temp
 tmp/
+
+
+results/jtl/
+results/reports/
+*.log
